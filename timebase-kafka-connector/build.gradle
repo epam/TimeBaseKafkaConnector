@@ -1,0 +1,173 @@
+apply plugin: "java-library"
+apply plugin: "maven-publish"
+apply plugin: "com.github.spotbugs" // Static analysis
+apply plugin: 'com.github.johnrengelman.shadow'
+
+repositories {
+    mavenDeltixProxy("DevMain")
+}
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+sourceSets {
+    demo {
+        java {
+            compileClasspath += main.output
+            runtimeClasspath += main.output
+        }
+    }
+}
+
+configurations {
+    demoCompile.extendsFrom compile
+    demoRuntime.extendsFrom runtime
+}
+
+
+
+dependencies {
+    shadow 'org.apache.kafka:connect-api:2.6.0'
+    implementation "deltix.qsrv.timebase:deltix-timebase-api:5.4.14"
+    implementation "deltix.qsrv.timebase:deltix-timebase-client:5.4.14"
+
+    spotbugsPlugins 'com.h3xstream.findsecbugs:findsecbugs-plugin:1.9.0'
+
+    compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
+    compileOnly 'com.google.code.findbugs:annotations:3.0.1'
+
+    testImplementation "junit:junit:4.+"
+    testImplementation "org.mockito:mockito-core:2.6.3"
+    testImplementation "org.apache.kafka:connect-api:2.6.0"
+}
+
+// Run gradle with -Pspotbugs or -Dspotbugs=true or use system property SPOTBUGS=true to perform SpotBugs check
+spotbugs {
+    toolVersion = "4.1.1"
+    effort = "max"
+    reportLevel = "medium"
+    //ignoreFailures = true
+    //sourceSets = [sourceSets.main]
+    excludeFilter = rootProject.file('spotbugs-excludes.xml')
+}
+
+spotbugsTest {
+    enabled = false
+}
+
+
+// Spotbugs
+def enableSpotbugs = hasProperty("spotbugs") || Boolean.getBoolean("spotbugs") || Boolean.parseBoolean(System.getenv('SPOTBUGS'))
+if (enableSpotbugs) {
+    println("Spotbugs is ENABLED")
+}
+spotbugsMain {
+    enabled = enableSpotbugs
+    reports {
+        html.enabled = true
+        xml.enabled = true
+
+    }
+}
+//tasks.withType(com.github.spotbugs.SpotBugsTask) {
+//    enabled = enableSpotbugs
+//
+//    reports {
+//        xml.enabled = false
+//        html.enabled = true
+//    }
+//}
+
+publishing {
+
+    repositories {
+        maven {
+            url "${System.getenv('ARTIFACTORY_URL')}/EPM-RTC-java"
+            credentials {
+                username System.getenv('ARTIFACTORY_USER') ?: ''
+                password System.getenv('ARTIFACTORY_PASS') ?: ''
+            }
+        }
+    }
+
+    publications {
+        maven(MavenPublication) {
+            from components.java
+        }
+    }
+}
+
+jar {
+    manifest {
+        attributes 'Implementation-Title': 'Kafka Connector for TimeBase',
+                   'Implementation-Version': version
+    }
+}
+
+import org.apache.tools.ant.filters.ReplaceTokens
+
+def shadowJarDirectory = new File(buildDir, 'libs')
+def distDirectory = new File(buildDir, 'distributions')
+def resourcesDirectory = new File(buildDir, 'resources/main')
+
+task connectorPluginZip(type: Zip, dependsOn: shadowJar) {
+    archiveBaseName = 'epam-timebase-connector'
+    version = project.version
+    destinationDirectory = distDirectory
+    fileMode = 0444
+
+    from (shadowJarDirectory) {
+        into "epam-timebase-connector-${project.version}/lib"
+        include '*-all.jar' // shadow jar only
+    }
+
+    from (resourcesDirectory) {
+        into "epam-timebase-connector-${project.version}/lib"
+        include '*.jar-staging' // shadow jar only
+        rename '(.+)-staging', '$1'
+    }
+
+    from (resourcesDirectory) {
+        into "epam-timebase-connector-${project.version}/assets"
+        include '*.png'
+    }
+
+    from (resourcesDirectory) {
+        into "epam-timebase-connector-${project.version}"
+        include 'manifest.json'
+        filter(ReplaceTokens, tokens: [pluginVersion: project.version])
+    }
+}
+
+ext {
+    dockerImageName = 'quantserver/kafka-timebase-connector'
+}
+
+ext.dockerFileReplaceTokens = [
+    pluginVersion: project.version
+]
+
+// Use :timebase-kafka-connector:dockerPublishImage to publish the image
+task prepareFilesForDocker(type: Copy) {
+    group 'docker'
+    dependsOn 'connectorPluginZip'
+
+    into project.file("$buildDir/docker/tb-kafka")
+    from (connectorPluginZip.destinationDirectory) {
+        include '*.zip'
+    }
+}
+
+task publishShadowJar(type: Exec, dependsOn: shadowJar) {
+//    doFirst {
+//        println "destination: ${System.getenv('ARTIFACTORY_URL')}/EPM-RTC-public/QuantServer/TimeBase/TimeBaseKafkaConnector/${version}/${shadowJar.archiveFileName.get()}";
+//        println "archiveFileName: ${shadowJar.archiveFile.get()}";
+//    }
+
+    commandLine "curl", "--silent", "--show-error", "--fail",
+            "${System.getenv('ARTIFACTORY_URL')}/EPM-RTC-public/QuantServer/TimeBase/TimeBaseKafkaConnector/${version}/${shadowJar.archiveFileName.get()}",
+            "--user", "${System.getenv('ARTIFACTORY_USER')}:${System.getenv('ARTIFACTORY_PASS')}",
+            "--upload-file", "${shadowJar.archiveFile.get()}"
+}
+
+
